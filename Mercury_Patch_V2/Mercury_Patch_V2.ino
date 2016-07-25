@@ -120,11 +120,12 @@ void __ble_assert(const char *file, uint16_t line)
 void setup(void)
 {
 
-  
-  ADCSRA = 0;  // disable ADC
-  power_adc_disable(); // ADC converter
-  power_usart0_disable();// Serial (USART) 
-  power_twi_disable(); // TWI (I2C)
+//  Power down any uneeded Atmega328 features
+
+//  ADCSRA = 0;  // disable ADC
+//  power_adc_disable(); // ADC converter
+//  power_usart0_disable();// Serial (USART) 
+//  power_twi_disable(); // TWI (I2C)
   
   //set pin modes of MCP3208
   pinMode(SELPIN, OUTPUT);
@@ -132,13 +133,15 @@ void setup(void)
   pinMode(DATAIN, OUTPUT);
   pinMode(SPICLOCK, OUTPUT);
   
-  //disable device to start with
+  //disable  MCP3208 to start with
   digitalWrite(SELPIN, HIGH);
   digitalWrite(DATAIN, LOW);
   digitalWrite(SPICLOCK, LOW);
 
 
+  //Set Atmega Serial rate, 34800 optimum for error % when debugging, should be able to get away with 57600
   Serial.begin(115200);
+  
   /*
     Point ACI data structures to the the setup data that the nRFgo studio generated for the nRF8001
   */
@@ -173,27 +176,24 @@ void setup(void)
   aci_state.aci_pins.optional_chip_sel_pin  = UNUSED;
 
   aci_state.aci_pins.interface_is_interrupt = false; //Interrupt Enabled 
-  aci_state.aci_pins.interrupt_number       = 1; //Interrupt two = external input on pin D2, ie RDYN pin
+  aci_state.aci_pins.interrupt_number       = 1; //Interrupt number, highest is device reset, then external inputs
 
-  //We reset the nRF8001 here by toggling the RESET line connected to the nRF8001
-  //If the RESET line is not available we call the ACI Radio Reset to soft reset the nRF8001
-  //then we initialize the data structures required to setup the nRF8001
+  //Initialize the data structures required to setup the nRF8001
   //The second parameter is for turning debug printing on for the ACI Commands and Events so they be printed on the Serial
   lib_aci_init(&aci_state, false);
-  delay(2000);
 
-  
-  lib_aci_change_timing(minConn,maxConn,slaveLat,superTime);
-                               
+  //Delay 1s to ensure full setup
+  delay(1000);
+                            
 }
 
-//Initializes 
+//Initializes BLE UART communication
 void uart_over_ble_init(void)
 {
   uart_over_ble.uart_rts_local = true;
 }
 
-//Helper function for transmitting data from slave to client.
+//Helper function for transmitting data from slave to client. Currently not in use, but will be added soon
 bool uart_tx(uint8_t *buffer, uint8_t buffer_len)
 {
   bool status = false;
@@ -213,6 +213,8 @@ bool uart_tx(uint8_t *buffer, uint8_t buffer_len)
 /*
  * UART_process_control used for handling rx inputs from master/client. They are not
  * presently used in the code.
+ * 
+ * Currently no control is being transmitted from the android app.
  */
 bool uart_process_control_point_rx(uint8_t *byte, uint8_t length)
 {
@@ -277,7 +279,11 @@ bool uart_process_control_point_rx(uint8_t *byte, uint8_t length)
   return status;
 }
 
-
+/*
+ * 
+ * BLE primary loop for handling ACI events
+ * 
+ */
 void aci_loop()
 {
   //Serial.println("Entering aci_loop() function...");
@@ -457,7 +463,7 @@ void aci_loop()
   }
   else
   {
-    //Serial.println(F("No ACI Events available"));
+    Serial.println(F("No ACI Events available"));
     // No event in the ACI Event queue and if there is no event in the ACI command queue the arduino can go to sleep
     // Arduino can go to sleep now
     // Wakeup from sleep from the RDYN line
@@ -476,20 +482,26 @@ void aci_loop()
   }
 }
 
-//Main loop()
+/*
+ * 
+ * Main iteration loop
+ */
 void loop() {
   //Process any ACI commands or events
    aci_loop();
-   gotoSleep();
+ //  gotoSleep();
 //   
-  if (connectedState && wdtInterrupt) {
+  //If time interval is met transmit data
+  if (millis() - lastTime > sendingInterval && connectedState) {
     sensor_transmit_16bits();
+    lastTime = millis();
   }
 }
 
 //Transmit ADC channels 1-7
 void sensor_transmit_16bits()
 {
+  //MCP3208 iterates channels 1-8 instead of 0-7
   for (int g = 1; g < 8; g++)
   {
    read_adc(g);
@@ -509,7 +521,8 @@ void read_adc(int channel) {
   commandbits |= ((channel - 1) << 3);
 
   digitalWrite(SELPIN, LOW); //Select adc
-  // setup bits to be written
+  
+  // setup bits to be written to MCP3208
   for (int i = 7; i >= 3; i--) {
     digitalWrite(DATAIN, commandbits & 1 << i);
     //cycle clock
@@ -517,7 +530,8 @@ void read_adc(int channel) {
     digitalWrite(SPICLOCK, LOW);
   }
 
-  digitalWrite(SPICLOCK, HIGH);   //ignores 2 null bits
+  //Writes to 2 bytes, 2 clock cycles to finish processing setup bits written to MCP3208
+  digitalWrite(SPICLOCK, HIGH);   
   digitalWrite(SPICLOCK, LOW);
   digitalWrite(SPICLOCK, HIGH);
   digitalWrite(SPICLOCK, LOW);
@@ -548,47 +562,47 @@ void read_adc(int channel) {
  */
 
 //For pin interupt
-void wakeOnInterrupt ()
- {
- extInterrupt = true;
- detachInterrupt (0);  // don't need the external interrupts any more
- }
-
-//Setup Watchdog timer
-void myWatchdogEnable() {  // turn on watchdog timer; interrupt mode every 0.5s
- MCUSR = 0;
- WDTCSR |= B00011000;
- WDTCSR = B01000101;
-}
-
-//Sleep function
-void gotoSleep(void)
-{
-   ADCSRA = 0;                    //disable the ADC
-   noInterrupts ();     // timed sequences follow
-//   EIFR = bit (INTF0);  // clear flag for interrupt 0
-//   attachInterrupt (0, wakeOnInterrupt, FALLING);
-   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  // if (connectedState){
-   myWatchdogEnable();
-  // }
-   
-   wdtInterrupt = false;
-   extInterrupt = false;
-   sleep_enable();
-   byte mcucr1 = MCUCR | bit(BODS) | bit(BODSE); //turn off the brown-out detector while sleeping
-   byte mcucr2 = mcucr1 & ~bit(BODSE);
-   MCUCR = mcucr1; //timed sequence
-   MCUCR = mcucr2; //BODS stays active for 3 cycles, sleep instruction must be executed while it's active
-   interrupts ();      // need interrupts now
-   sleep_cpu();                   //go to sleep
-   sleep_disable();               //wake up here
-}
-
-//Watchdog interrupt
-ISR(WDT_vect) {
- wdtInterrupt = true;
- wdt_disable();
-}
+//void wakeOnInterrupt ()
+// {
+// extInterrupt = true;
+// detachInterrupt (0);  // don't need the external interrupts any more
+// }
+//
+////Setup Watchdog timer
+//void myWatchdogEnable() {  // turn on watchdog timer; interrupt mode every 0.5s
+// MCUSR = 0;
+// WDTCSR |= B00011000;
+// WDTCSR = B01000101;
+//}
+//
+////Sleep function
+//void gotoSleep(void)
+//{
+//   ADCSRA = 0;                    //disable the ADC
+//   noInterrupts ();     // timed sequences follow
+////   EIFR = bit (INTF0);  // clear flag for interrupt 0
+////   attachInterrupt (0, wakeOnInterrupt, FALLING);
+//   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+//  // if (connectedState){
+//   myWatchdogEnable();
+//  // }
+//   
+//   wdtInterrupt = false;
+//   extInterrupt = false;
+//   sleep_enable();
+//   byte mcucr1 = MCUCR | bit(BODS) | bit(BODSE); //turn off the brown-out detector while sleeping
+//   byte mcucr2 = mcucr1 & ~bit(BODSE);
+//   MCUCR = mcucr1; //timed sequence
+//   MCUCR = mcucr2; //BODS stays active for 3 cycles, sleep instruction must be executed while it's active
+//   interrupts ();      // need interrupts now
+//   sleep_cpu();                   //go to sleep
+//   sleep_disable();               //wake up here
+//}
+//
+////Watchdog interrupt
+//ISR(WDT_vect) {
+// wdtInterrupt = true;
+// wdt_disable();
+//}
 
  
